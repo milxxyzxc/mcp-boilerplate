@@ -1,0 +1,20 @@
+{
+  "apps": [
+    {
+      "name": "mcp",
+      "script": "dist/index.js",
+      "instances": 2,
+      "exec_mode": "cluster",
+      "watch": true,
+      "log_date_format": "YYYY-MM-DD HH:mm:ss",
+      "combine_logs": true,
+      "merge_logs": true,
+      "max_memory_restart": "1G",
+      "max_restarts": 30,
+      "min_uptime": "5s",
+      "exp_backoff_restart_delay": 100,
+      "error_file": "../logs/err.log",
+      "out_file": "../logs/out.log"
+    }
+  ]
+}
