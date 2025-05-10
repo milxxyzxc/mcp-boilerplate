@@ -18,6 +18,55 @@ The server currently includes the following example tool:
 
 - `calculator`: Performs basic arithmetic operations (add, subtract, multiply, divide)
 
+For information on how to add your own custom tools, check out the [Extending the Boilerplate section](#extending-the-boilerplate).
+
+## Configuration
+
+The server configuration is centralized in `src/config.ts`. This makes it easy to adjust settings without modifying multiple files.
+
+```typescript
+// Essential configuration options
+export const config = {
+  server: {
+    name: "mcp-boilerplate",
+    version: "1.0.0",
+    port: parseInt(process.env.PORT || "4005"),
+    host: process.env.HOST || "localhost",
+    apiKey: process.env.API_KEY || "dev_key",
+  },
+  sse: {
+    // How often to send keepalive messages (in milliseconds)
+    keepaliveInterval: 30000,
+    // Whether to send ping events in addition to comments
+    usePingEvents: true,
+    // Initial connection message
+    sendConnectedEvent: true,
+  },
+  tools: {
+    // Number of retries for failed tool executions
+    maxRetries: 3,
+    // Delay between retries (in milliseconds)
+    retryDelay: 1000,
+    // Whether to send notifications about tool execution status
+    sendNotifications: true,
+  },
+  logging: {
+    // Default log level
+    defaultLevel: "debug",
+    // How often to send log messages (in milliseconds)
+    logMessageInterval: 10000,
+  },
+};
+```
+
+### Troubleshooting SSE Timeouts
+
+If you're experiencing "Body timeout error" with your MCP connection:
+
+1. Decrease `keepaliveInterval` to send more frequent keepalive messages (e.g., 15000ms)
+2. Ensure `usePingEvents` is enabled for additional connection stability
+3. Check for any proxy timeouts if you're using a proxy server
+
 ## Setup
 
 1. Install dependencies:

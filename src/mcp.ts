@@ -7,6 +7,7 @@ import {
 } from "@modelcontextprotocol/sdk/types.js";
 import { logMessages } from "./types/log.types.js";
 import { toolConfigs } from "./tools.js";
+import { config } from "./config.js";
 
 // Flag to track if we have active connections
 let hasActiveConnections = false;
@@ -20,8 +21,8 @@ export const createServer = async () => {
   // Initialize the MCP server
   const server = new Server(
     {
-      name: "mcp-boilerplate",
-      version: "1.0.0",
+      name: config.server.name,
+      version: config.server.version,
     },
     {
       capabilities: {
@@ -43,14 +44,35 @@ export const createServer = async () => {
   );
 
   // Setup logging
-  let logLevel: LoggingLevel = "debug";
+  let logLevel: LoggingLevel = config.logging.defaultLevel;
   let logsUpdateInterval: NodeJS.Timeout | undefined;
+  let heartbeatInterval: NodeJS.Timeout | undefined;
 
   const isMessageIgnored = (level: LoggingLevel): boolean => {
     const currentLevel = logMessages.findIndex((msg) => logLevel === msg.level);
     const messageLevel = logMessages.findIndex((msg) => level === msg.level);
     return messageLevel < currentLevel;
   };
+
+  // Send heartbeat notification to check connection health
+  const sendHeartbeat = () => {
+    if (!hasActiveConnections) return; // Skip if no active connections
+
+    try {
+      server.notification({
+        method: "notifications/message",
+        params: {
+          level: "debug",
+          data: "Server heartbeat",
+        },
+      });
+    } catch (error) {
+      console.error("Error sending heartbeat notification:", error);
+    }
+  };
+
+  // Set up heartbeat interval
+  heartbeatInterval = setInterval(sendHeartbeat, config.sse.keepaliveInterval);
 
   // Set up update interval for random log messages - reduced frequency to avoid overloading
   logsUpdateInterval = setInterval(() => {
@@ -72,7 +94,58 @@ export const createServer = async () => {
         console.error("Error sending notification:", error);
       }
     }
-  }, 60000); // Reduced frequency to once per minute
+  }, config.logging.logMessageInterval);
+
+  // Retry function for tool execution
+  const retryToolExecution = async (
+    handler: Function,
+    params: any,
+    toolName: string,
+    maxRetries = config.tools.maxRetries,
+    delay = config.tools.retryDelay
+  ) => {
+    let lastError;
+
+    for (let attempt = 1; attempt <= maxRetries; attempt++) {
+      try {
+        return await handler(params);
+      } catch (error) {
+        lastError = error;
+        console.error(
+          `Error executing tool '${toolName}' (attempt ${attempt}/${maxRetries}):`,
+          error
+        );
+
+        // Send error notification to client
+        if (config.tools.sendNotifications) {
+          try {
+            server.notification({
+              method: "notifications/message",
+              params: {
+                level: "error",
+                data: `Tool '${toolName}' failed on attempt ${attempt}/${maxRetries}: ${
+                  error instanceof Error ? error.message : String(error)
+                }`,
+              },
+            });
+          } catch (notificationError) {
+            console.error(
+              "Failed to send error notification:",
+              notificationError
+            );
+          }
+        }
+
+        // Don't wait on the last attempt
+        if (attempt < maxRetries) {
+          await new Promise((resolve) => setTimeout(resolve, delay));
+        }
+      }
+    }
+
+    // If we get here, all retries failed
+    throw lastError;
+  };
 
   // Handle listing tools - use the tools array
   server.setRequestHandler(ListToolsRequestSchema, async () => {
@@ -100,11 +173,18 @@ export const createServer = async () => {
 
   // Handle calling a tool
   server.setRequestHandler(CallToolRequestSchema, async (request) => {
-    console.log(
-      `[LOG] Handling tools/call request for tool: ${
-        request?.params?.name
-      }, parameters: ${JSON.stringify(request?.params?.arguments)}`
-    );
+    if (config.logging.logToolParams) {
+      console.log(
+        `[LOG] Handling tools/call request for tool: ${
+          request?.params?.name
+        }, parameters: ${JSON.stringify(request?.params?.arguments)}`
+      );
+    } else {
+      console.log(
+        `[LOG] Handling tools/call request for tool: ${request?.params?.name}`
+      );
+    }
+
     hasActiveConnections = true; // Set to true when we receive a request
 
     if (typeof request?.params?.name !== "string") {
@@ -112,20 +192,74 @@ export const createServer = async () => {
     }
 
     // Find the tool handler
-    const handler = toolConfigs.find(
+    const toolConfig = toolConfigs.find(
       (tool) => tool.name === request?.params?.name
-    )?.handler;
-    if (!handler) {
+    );
+
+    if (!toolConfig || !toolConfig.handler) {
       throw new Error(`Tool '${request?.params?.name}' not found`);
     }
 
     try {
-      // Call the handler with the parameters
-      const result = await handler(request?.params?.arguments);
-      console.log(`[LOG] Tool final result: ${JSON.stringify(result)}`);
+      // Send notification that we're calling the tool
+      if (config.tools.sendNotifications) {
+        server.notification({
+          method: "notifications/message",
+          params: {
+            level: "info",
+            data: `Executing tool: ${request?.params?.name}`,
+          },
+        });
+      }
+
+      // Call the handler with the parameters and retry if it fails
+      const result = await retryToolExecution(
+        toolConfig.handler,
+        request?.params?.arguments,
+        request?.params?.name
+      );
+
+      if (config.logging.logToolResults) {
+        console.log(`[LOG] Tool final result: ${JSON.stringify(result)}`);
+      } else {
+        console.log(`[LOG] Tool execution complete: ${request?.params?.name}`);
+      }
+
+      // Send notification when tool execution is complete
+      if (config.tools.sendNotifications) {
+        server.notification({
+          method: "notifications/message",
+          params: {
+            level: "info",
+            data: `Tool execution completed: ${request?.params?.name}`,
+          },
+        });
+      }
+
       return result;
     } catch (error) {
       console.error(`Error calling tool ${request?.params?.name}:`, error);
+
+      // Send a more detailed error notification
+      if (config.tools.sendNotifications) {
+        try {
+          server.notification({
+            method: "notifications/message",
+            params: {
+              level: "error",
+              data: `Tool execution failed: ${request?.params?.name} - ${
+                error instanceof Error ? error.message : String(error)
+              }`,
+            },
+          });
+        } catch (notificationError) {
+          console.error(
+            "Failed to send error notification:",
+            notificationError
+          );
+        }
+      }
+
       throw error instanceof Error ? error : new Error(String(error));
     }
   });
@@ -133,6 +267,7 @@ export const createServer = async () => {
   const cleanup = async () => {
     console.log("Cleaning up MCP server resources...");
     if (logsUpdateInterval) clearInterval(logsUpdateInterval);
+    if (heartbeatInterval) clearInterval(heartbeatInterval);
   };
 
   return { server, cleanup };

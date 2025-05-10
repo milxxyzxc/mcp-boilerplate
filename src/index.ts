@@ -2,21 +2,25 @@ import { SSEServerTransport } from "@modelcontextprotocol/sdk/server/sse.js";
 import express from "express";
 import cors from "cors";
 import { createServer, setConnectionStatus } from "./mcp.js";
-import dotenv from "dotenv";
-
-// Load environment variables
-dotenv.config();
+import { config } from "./config.js";
 
 console.log("Starting MCP SSE server...");
 
 const app = express();
 
+// Add CORS configuration
+app.use(cors());
+// Use JSON middleware
+app.use(express.json());
+
 // Store transports by session ID
 const transports: Record<string, SSEServerTransport> = {};
+// Store keepalive intervals by session ID
+const keepaliveIntervals: Record<string, NodeJS.Timeout> = {};
 
 // Health check endpoint
 app.get("/health", (req, res) => {
-  res.status(200).json({ status: "ok", version: "1.0.0" });
+  res.status(200).json({ status: "ok", version: config.server.version });
 });
 
 // MCP server and cleanup function
@@ -29,6 +33,16 @@ let serverInstance: {
 app.get("/sse", async (req, res) => {
   console.log("Received GET request to /sse (establishing SSE stream)");
 
+  // Set appropriate headers for SSE
+  res.setHeader("Content-Type", "text/event-stream");
+  res.setHeader("Cache-Control", "no-cache");
+  res.setHeader("Connection", "keep-alive");
+  res.setHeader("X-Accel-Buffering", "no"); // Disable buffering for Nginx
+
+  // Increase timeout for the connection
+  req.socket.setTimeout(0); // Disable timeout
+  res.setTimeout(0); // Disable timeout
+
   // Validate API key
   const apiKey = req.query.API_KEY;
   if (!apiKey) {
@@ -37,7 +51,7 @@ app.get("/sse", async (req, res) => {
     return;
   }
 
-  if (apiKey !== process.env.API_KEY) {
+  if (apiKey !== config.server.apiKey) {
     console.error("Authentication failed: Invalid API key");
     res.status(401).json({ error: "Unauthorized: Invalid API key" });
     return;
@@ -60,6 +74,33 @@ app.get("/sse", async (req, res) => {
     const sessionId = transport.sessionId;
     transports[sessionId] = transport;
 
+    // Set up keepalive interval to prevent timeout
+    const keepaliveInterval = setInterval(() => {
+      try {
+        if (res.writableEnded) {
+          clearInterval(keepaliveInterval);
+          return;
+        }
+
+        // Send a comment as a keepalive to prevent timeout
+        res.write(": keepalive\n\n");
+
+        // Also send a ping event that all SSE clients should recognize
+        if (config.sse.usePingEvents) {
+          res.write(`event: ping\ndata: ${Date.now()}\n\n`);
+        }
+      } catch (error) {
+        console.error(
+          `Error sending keepalive for session ${sessionId}:`,
+          error
+        );
+        clearInterval(keepaliveInterval);
+        deleteSession(sessionId);
+      }
+    }, config.sse.keepaliveInterval);
+
+    keepaliveIntervals[sessionId] = keepaliveInterval;
+
     // Update connection status
     setConnectionStatus(true);
     console.log(`Creating new SSE transport with session ID: ${sessionId}`);
@@ -67,28 +108,29 @@ app.get("/sse", async (req, res) => {
     // Set up onclose handler to clean up transport when closed
     transport.onclose = () => {
       console.log(`SSE transport closed for session ${sessionId}`);
-      delete transports[sessionId];
-
-      // If no more transports, update connection status
-      if (Object.keys(transports).length === 0) {
-        setConnectionStatus(false);
-      }
+      deleteSession(sessionId);
     };
 
     // Handle client disconnect
     req.on("close", () => {
       console.log(`Client disconnected for session ${sessionId}`);
-      delete transports[sessionId];
+      deleteSession(sessionId);
+    });
 
-      // If no more transports, update connection status
-      if (Object.keys(transports).length === 0) {
-        setConnectionStatus(false);
-      }
+    // Handle errors on the response
+    res.on("error", (error) => {
+      console.error(`Error on SSE response for session ${sessionId}:`, error);
+      deleteSession(sessionId);
     });
 
     // Connect to MCP server
     await serverInstance.server.connect(transport);
     console.log(`Established SSE stream with session ID: ${sessionId}`);
+
+    // Send initial message to confirm connection
+    if (config.sse.sendConnectedEvent) {
+      res.write('event: connected\ndata: {"status":"connected"}\n\n');
+    }
   } catch (error) {
     const errorMessage =
       error instanceof Error ? error.message : "Unknown error";
@@ -101,8 +143,36 @@ app.get("/sse", async (req, res) => {
   }
 });
 
-// Message handling endpoint
-app.post("/messages", async (req, res) => {
+// Helper function to clean up session resources
+function deleteSession(sessionId: string) {
+  // Clear the keepalive interval
+  if (keepaliveIntervals[sessionId]) {
+    clearInterval(keepaliveIntervals[sessionId]);
+    delete keepaliveIntervals[sessionId];
+  }
+
+  // Delete the transport
+  delete transports[sessionId];
+
+  // If no more transports, update connection status
+  if (Object.keys(transports).length === 0) {
+    setConnectionStatus(false);
+  }
+}
+
+// Message handling endpoint with ping support
+app.post("/messages", (req, res) => {
+  // Handle ping requests directly for faster response
+  if (req.body && req.body.jsonrpc === "2.0" && req.body.method === "ping") {
+    console.log(`Received ping request with ID: ${req.body.id}`);
+    res.json({
+      jsonrpc: "2.0",
+      id: req.body.id,
+      result: {},
+    });
+    return;
+  }
+
   // Extract session ID from URL query parameter
   const sessionId = req.query.sessionId as string | undefined;
 
@@ -119,17 +189,15 @@ app.post("/messages", async (req, res) => {
     return;
   }
 
-  try {
-    // Handle the POST message with the transport
-    await transport.handlePostMessage(req, res, req.body);
-  } catch (error) {
+  // Handle the POST message with the transport
+  transport.handlePostMessage(req, res, req.body).catch((error) => {
     const errorMessage =
       error instanceof Error ? error.message : "Unknown error";
     console.error(`Error handling request: ${errorMessage}`, error);
     if (!res.headersSent) {
       res.status(500).send(`Error handling request: ${errorMessage}`);
     }
-  }
+  });
 });
 
 // Initialize the MCP server
@@ -164,19 +232,29 @@ process.on("SIGTERM", async () => {
   process.exit(0);
 });
 
+// Handle uncaught exceptions
+process.on("uncaughtException", (error) => {
+  console.error("Uncaught exception:", error);
+  // Keep the process running
+});
+
+// Handle unhandled promise rejections
+process.on("unhandledRejection", (reason, promise) => {
+  console.error("Unhandled Rejection at:", promise, "reason:", reason);
+  // Keep the process running
+});
+
 // Initialize the server before starting
 initializeServer().then(() => {
-  // Start the server with different port to avoid conflict
-  const PORT = parseInt(process.env.PORT || "4005");
-  const HOST = process.env.HOST || "localhost";
+  // Start the server with port/host from config
+  const PORT = config.server.port;
+  const HOST = config.server.host;
 
   app.listen(PORT, HOST, () => {
     console.log(`MCP server is running at http://${HOST}:${PORT}`);
     console.log(`Health check: http://${HOST}:${PORT}/health`);
     console.log(
-      `SSE endpoint: http://${HOST}:${PORT}/sse?API_KEY=${
-        process.env.API_KEY || "dev_key"
-      }`
+      `SSE endpoint: http://${HOST}:${PORT}/sse?API_KEY=${config.server.apiKey}`
     );
   });
 });
