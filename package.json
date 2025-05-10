@@ -2,7 +2,26 @@
   "name": "mcp-boilerplate",
   "version": "0.1.0",
   "description": "Global MCP server boilerplate with example tools and prompts",
-  "author": "srikanthnani",
+  "author": {
+    "name": "Srikanth Nani",
+    "url": "https://github.com/iamsrikanthnani",
+    "twitter": "@truly_sn"
+  },
+  "license": "MIT",
+  "homepage": "https://github.com/iamsrikanthnani/mcp-boilerplate",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/iamsrikanthnani/mcp-boilerplate.git"
+  },
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "ai",
+    "tools",
+    "server",
+    "boilerplate",
+    "sse"
+  ],
   "type": "module",
   "bin": {
     "mcp-boilerplate": "dist/index.js"

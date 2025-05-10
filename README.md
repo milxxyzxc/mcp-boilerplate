@@ -203,3 +203,7 @@ The server manages client sessions through:
 
 - [MCP Documentation](https://modelcontextprotocol.io/introduction)
 - [MCP TypeScript SDK](https://modelcontextprotocol.io/typescript/index.html)
+
+## License
+
+This project is licensed under the [MIT License](LICENSE) - see the [LICENSE](LICENSE) file for details.
